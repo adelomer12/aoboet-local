@@ -196,15 +196,13 @@ def decode_inv(frame: bytes):
         out["charging"] = cur > 0
         out["soc_pct"] = body[6]
     if len(body) >= 17:
-        # bytes 12 and 16 are the two BMS temperature probes. Within a session they
-        # track Luxpower's battery temperature 1:1 (e.g. b12 9->10->11 as LXP 31->32->33).
-        # The reading is temp_c = raw + TEMP_OFFSET; anchor the offset from one Luxpower
-        # value (b12=9 at 31 C -> offset +22). Raw bytes are also exposed for re-anchoring.
+        # Bytes 12 and 16 were once thought to be temperature probes, but a wider
+        # range disproved it: at LXP 31/33/38 C they read 9/11/47 and 9/10/20 — they
+        # scale with charge current/SOC, not temperature. Battery temperature is NOT
+        # in the c0 frame; use the Luxpower BMS temperature sensor instead. These two
+        # bytes (charge-related, exact meaning TBD) are exposed raw only.
         out["c0_b12_raw"] = body[12]
         out["c0_b16_raw"] = body[16]
-        out["temp_probe1_c"] = body[12] + TEMP_OFFSET
-        out["temp_probe2_c"] = body[16] + TEMP_OFFSET
-        out["temp_c"] = max(body[12], body[16]) + TEMP_OFFSET
     return out
 
 
@@ -267,7 +265,6 @@ class HAPublisher:
         sensor("cell_delta_mv", "Cell Delta", "mV", "voltage")
         sensor("cell_avg_mv", "Cell Avg", "mV", "voltage")
         sensor("current_a", "Current", "A", "current")
-        sensor("temp_c", "Battery Temperature", "°C", "temperature")
         for i in range(ncell):
             sensor(
                 f"cell_{i+1}",
@@ -335,17 +332,17 @@ def serve(args):
                             last = time.time()
                     elif t == T_INV:
                         di = decode_inv(frame)
-                        for k in ("current_a", "charging", "temp_c",
-                                  "temp_probe1_c", "temp_probe2_c",
+                        if args.debug_c0:
+                            body = frame[3 + ID_LEN : -2]
+                            print(f"C0 bodylen={len(body)} hex={body.hex(' ')}", flush=True)
+                        for k in ("current_a", "charging",
                                   "c0_b12_raw", "c0_b16_raw"):
                             if k in di:
                                 inv_extra[k] = di[k]
                         if args.raw:
                             print(
                                 f"INV  pack={di.get('pack_voltage_v')}V soc={di.get('soc_pct')}% "
-                                f"I={di.get('current_a')}A charging={di.get('charging')} "
-                                f"temp={di.get('temp_c')}C (p1={di.get('temp_probe1_c')} "
-                                f"p2={di.get('temp_probe2_c')})"
+                                f"I={di.get('current_a')}A charging={di.get('charging')}"
                             )
         except socket.timeout:
             print("[!] no data for 120s, dropping connection", file=sys.stderr)
@@ -371,6 +368,8 @@ def build_argparser():
     ap.add_argument("--temp-offset", type=int, default=TEMP_OFFSET,
                     help="degrees C added to the raw c0 temp byte (default 22; "
                          "re-anchor as luxpower_C minus c0_b12_raw)")
+    ap.add_argument("--debug-c0", action="store_true",
+                    help="log every c0 frame's body length and hex (for field mapping)")
     return ap
 
 
